@@ -1140,7 +1140,41 @@ export class InsertQueryBuilder<
         mergeSourceAlias: string,
     ): string {
         const valueSets = this.getValueSets()
-        const columns = this.getInsertedColumns()
+        let columns = this.getInsertedColumns()
+
+        // For MERGE INTO, we need to include conflict path columns in the source
+        // even if they are auto-generated (e.g., identity columns in SAP HANA)
+        // because they are needed for the ON clause (conflict detection)
+        if (
+            this.expressionMap.onUpdate?.conflict &&
+            this.expressionMap.mainAlias!.hasMetadata
+        ) {
+            const conflictPaths = Array.isArray(
+                this.expressionMap.onUpdate.conflict,
+            )
+                ? this.expressionMap.onUpdate.conflict
+                : [this.expressionMap.onUpdate.conflict]
+
+            const conflictColumns =
+                this.expressionMap.mainAlias!.metadata.columns.filter(
+                    (column) =>
+                        conflictPaths.includes(column.databaseName) ||
+                        conflictPaths.includes(column.propertyPath),
+                )
+
+            // Add conflict columns that are not already in the inserted columns
+            const additionalColumns = conflictColumns.filter(
+                (conflictColumn) =>
+                    !columns.some(
+                        (col) =>
+                            col.databaseName === conflictColumn.databaseName,
+                    ),
+            )
+
+            if (additionalColumns.length > 0) {
+                columns = [...columns, ...additionalColumns]
+            }
+        }
 
         let expression = "USING ("
         // if column metadatas are given then apply all necessary operations with values
@@ -1264,7 +1298,9 @@ export class InsertQueryBuilder<
                     (column.isGenerated &&
                         column.generationStrategy === "uuid" &&
                         this.connection.driver.isUUIDGenerationSupported()) ||
-                    (column.isGenerated && column.generationStrategy !== "uuid")
+                    (column.isGenerated &&
+                        column.generationStrategy !== "uuid" &&
+                        !this.isOverridingAutoIncrementBehavior(column))
                 ) {
                     expression += `DEFAULT`
                 } else {
